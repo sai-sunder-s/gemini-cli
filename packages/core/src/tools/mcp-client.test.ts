@@ -37,6 +37,39 @@ vi.mock('../mcp/oauth-provider.js');
 vi.mock('../mcp/oauth-token-storage.js');
 vi.mock('../mcp/oauth-utils.js');
 
+vi.mock('../mcp/google-auth-provider.js', () => {
+  class GoogleCredentialProvider {
+    constructor(private readonly config?: { url?: string; httpUrl?: string }) {
+      const url = this.config?.url || this.config?.httpUrl;
+      if (!url) {
+        throw new Error(
+          'URL must be provided in the config for Google Credentials provider',
+        );
+      }
+    }
+
+    async getRequestHeaders() {
+      const quotaProjectId = await this.getQuotaProjectId();
+      const headers: Record<string, string> = {};
+      if (quotaProjectId) {
+        headers['X-Goog-User-Project'] = quotaProjectId;
+      }
+      return headers;
+    }
+
+    async tokens() {
+      return { access_token: 'test-token' };
+    }
+
+    async getQuotaProjectId() {
+      return undefined;
+    }
+  }
+
+  return {
+    GoogleCredentialProvider,
+  };
+});
 vi.mock('../utils/events.js', () => ({
   coreEvents: {
     emitFeedback: vi.fn(),
@@ -487,7 +520,9 @@ describe('mcp-client', () => {
         );
 
         expect(transport).toEqual(
-          new StreamableHTTPClientTransport(new URL('http://test-server'), {}),
+          new StreamableHTTPClientTransport(new URL('http://test-server'), {
+            requestInit: { headers: {} },
+          }),
         );
       });
 
@@ -521,7 +556,9 @@ describe('mcp-client', () => {
           false,
         );
         expect(transport).toEqual(
-          new SSEClientTransport(new URL('http://test-server'), {}),
+          new SSEClientTransport(new URL('http://test-server'), {
+            requestInit: { headers: {} },
+          }),
         );
       });
 
@@ -632,6 +669,65 @@ describe('mcp-client', () => {
         ).rejects.toThrow(
           'URL must be provided in the config for Google Credentials provider',
         );
+      });
+
+      it('should use X-Goog-User-Project from config and prioritize it', async () => {
+        const mockGetQuotaProjectId = vi
+          .fn()
+          .mockResolvedValue('provider-project');
+        const spy = vi
+          .spyOn(GoogleCredentialProvider.prototype, 'getQuotaProjectId')
+          .mockImplementation(mockGetQuotaProjectId);
+
+        const transport = await createTransport(
+          'test-server',
+          {
+            httpUrl: 'http://test.googleapis.com',
+            authProviderType: AuthProviderType.GOOGLE_CREDENTIALS,
+            oauth: {
+              scopes: ['scope1'],
+            },
+            headers: {
+              'X-Goog-User-Project': 'config-project',
+            },
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const headers = (transport as any)._requestInit?.headers;
+        expect(headers['X-Goog-User-Project']).toBe('config-project');
+        expect(mockGetQuotaProjectId).toHaveBeenCalled();
+        spy.mockRestore();
+      });
+
+      it('should use quotaProjectId from provider as fallback', async () => {
+        const mockGetQuotaProjectId = vi
+          .fn()
+          .mockResolvedValue('provider-project');
+        const spy = vi
+          .spyOn(GoogleCredentialProvider.prototype, 'getQuotaProjectId')
+          .mockImplementation(mockGetQuotaProjectId);
+
+        const transport = await createTransport(
+          'test-server',
+          {
+            httpUrl: 'http://test.googleapis.com',
+            authProviderType: AuthProviderType.GOOGLE_CREDENTIALS,
+            oauth: {
+              scopes: ['scope1'],
+            },
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const headers = (transport as any)._requestInit?.headers;
+        expect(headers['X-Goog-User-Project']).toBe('provider-project');
+        expect(mockGetQuotaProjectId).toHaveBeenCalled();
+        spy.mockRestore();
       });
     });
   });
